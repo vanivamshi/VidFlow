@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "video-service"
+    static_configs:
+      - targets: ["video-service:8000"]
+    metrics_path: /metrics
+
+  - job_name: "user-service"
+    static_configs:
+      - targets: ["user-service:8000"]
+    metrics_path: /metrics
+
+  - job_name: "search-service"
+    static_configs:
+      - targets: ["search-service:8000"]
+    metrics_path: /metrics
+
+  - job_name: "analytics-service"
+    static_configs:
+      - targets: ["analytics-service:8000"]
+    metrics_path: /metrics
+
+  - job_name: "recommendation-service"
+    static_configs:
+      - targets: ["recommendation-service:8000"]
+    metrics_path: /metrics
+
+  - job_name: "kafka"
+    static_configs:
+      - targets: ["kafka:9092"]
+
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis:6379"]

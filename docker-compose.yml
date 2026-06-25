@@ -1,0 +1,253 @@
+version: "3.9"
+
+x-common-env: &common-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  REDIS_URL: redis://redis:6379/0
+  POSTGRES_URL: postgresql://aivideo:aivideo@postgres:5432/aivideo
+  CASSANDRA_HOSTS: cassandra
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: minioadmin
+  MINIO_SECRET_KEY: minioadmin
+  QDRANT_URL: http://qdrant:6333
+
+services:
+  # ── API Gateway ──────────────────────────────────────────
+  api-gateway:
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./services/api-gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - video-service
+      - user-service
+      - search-service
+      - analytics-service
+      - recommendation-service
+
+  # ── Backend APIs ─────────────────────────────────────────
+  video-service:
+    build:
+      context: .
+      dockerfile: services/video-service/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: video-service
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+      - minio
+
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: user-service
+      JWT_SECRET: dev-secret-change-in-prod
+    depends_on:
+      - postgres
+      - redis
+
+  search-service:
+    build:
+      context: .
+      dockerfile: services/search-service/Dockerfile
+    ports:
+      - "8002:8000"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: search-service
+    depends_on:
+      - cassandra
+      - redis
+      - qdrant
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+    ports:
+      - "8003:8000"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: analytics-service
+    depends_on:
+      - cassandra
+      - redis
+      - kafka
+
+  recommendation-service:
+    build:
+      context: .
+      dockerfile: services/recommendation-service/Dockerfile
+    ports:
+      - "8004:8000"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: recommendation-service
+    depends_on:
+      - postgres
+      - redis
+      - cassandra
+
+  # ── Processing Workers ───────────────────────────────────
+  transcoder-worker:
+    build:
+      context: .
+      dockerfile: services/workers/transcoder/Dockerfile
+    environment:
+      <<: *common-env
+    depends_on:
+      - kafka
+      - minio
+      - postgres
+
+  transcriber-worker:
+    build:
+      context: .
+      dockerfile: services/workers/transcriber/Dockerfile
+    environment:
+      <<: *common-env
+    depends_on:
+      - kafka
+      - minio
+      - cassandra
+
+  embedder-worker:
+    build:
+      context: .
+      dockerfile: services/workers/embedder/Dockerfile
+    environment:
+      <<: *common-env
+    depends_on:
+      - kafka
+      - cassandra
+      - qdrant
+
+  # ── Data Stores ──────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aivideo
+      POSTGRES_PASSWORD: aivideo
+      POSTGRES_DB: aivideo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql
+
+  cassandra:
+    image: cassandra:4.1
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    depends_on:
+      - zookeeper
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ── Observability ──────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    volumes:
+      - ./logging/logstash/pipeline:/usr/share/logstash/pipeline
+    depends_on:
+      - elasticsearch
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+volumes:
+  postgres_data:
+  cassandra_data:
+  redis_data:
+  minio_data:
+  qdrant_data:
+  es_data:
